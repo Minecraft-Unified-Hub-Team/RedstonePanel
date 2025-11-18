@@ -274,3 +274,122 @@ func (api *API) handleStartInstance(instanceId string) error {
     return api.controlModule.Start(instanceId)
 }
 ```
+
+### Module Communication Flow
+
+```
+HTTP Request → API Handler → Module Method → MineDB → Response
+```
+
+1. **HTTP Request**: Client sends REST request to API endpoint
+2. **Authentication & Validation**: Middleware validates request and permissions
+3. **API Handler**: Routes request to appropriate handler method
+4. **Module Orchestration**: Handler calls one or more module methods
+5. **Data Persistence**: Modules interact with MineDB for state management
+6. **Response**: Structured JSON response returned to client
+
+### Dependency Injection Pattern
+
+```go
+type APIServer struct {
+    // Module dependencies
+    mineDB          *minedb.DB
+    installModule   *instance_installation.Module
+    controlModule   *instance_control.Module
+    manifestModule  *instance_manifest.Module
+    modsModule      *instance_mods.Module
+    
+    // Infrastructure
+    router          *mux.Router
+    middleware      *MiddlewareStack
+    config          *APIConfig
+}
+
+func NewAPIServer(dependencies Dependencies) *APIServer {
+    api := &APIServer{
+        mineDB:         dependencies.MineDB,
+        installModule:  instance_installation.NewModule(dependencies.MineDB, dependencies.InstallConfig),
+        controlModule:  instance_control.NewModule(dependencies.MineDB),
+        manifestModule: instance_manifest.NewModule(dependencies.MineDB, dependencies.ManifestConfig),
+        modsModule:     instance_mods.NewModule(dependencies.MineDB, dependencies.ModsConfig),
+    }
+    
+    api.setupRoutes()
+    return api
+}
+```
+
+### Complete Example: Instance Creation Flow
+
+```go
+// POST /api/v1/instances
+func (api *APIServer) CreateInstance(w http.ResponseWriter, r *http.Request) {
+    var req CreateInstanceRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        api.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+        return
+    }
+    
+    // Validate request
+    if err := req.Validate(); err != nil {
+        api.writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    
+    instancePath := filepath.Join(api.config.InstancesPath, req.Name)
+    
+    // Step 1: Install instance (InstanceInstallation module)
+    err := api.installModule.Install(instancePath, req.MinecraftVersion, req.ServerType)
+    if err != nil {
+        api.writeError(w, http.StatusInternalServerError, "Failed to install instance: " + err.Error())
+        return
+    }
+    
+    // Step 2: Configure server properties (InstanceManifest module)
+    if req.ServerProperties != nil {
+        err = api.manifestModule.WriteManifest(instancePath, common.ServerProperties, req.ServerProperties)
+        if err != nil {
+            // Cleanup on failure
+            api.installModule.Remove(instancePath)
+            api.writeError(w, http.StatusInternalServerError, "Failed to configure instance: " + err.Error())
+            return
+        }
+    }
+    
+    // Step 3: Install initial mods if specified (InstanceMods module)
+    for _, mod := range req.InitialMods {
+        _, err = api.modsModule.InstallByName(instancePath, mod.Name, mod.Options)
+        if err != nil {
+            log.Printf("Warning: Failed to install mod %s: %v", mod.Name, err)
+            // Continue with other mods, don't fail entire creation
+        }
+    }
+    
+    // Step 4: Get final instance state
+    state, err := api.controlModule.GetState(instancePath)
+    if err != nil {
+        log.Printf("Warning: Failed to get instance state: %v", err)
+        state = &common.ServerState{Status: common.StatusUnknown}
+    }
+    
+    // Response
+    response := CreateInstanceResponse{
+        ID:          req.Name,
+        Name:        req.Name,
+        Path:        instancePath,
+        Version:     req.MinecraftVersion,
+        ServerType:  req.ServerType,
+        Status:      string(state.Status),
+        CreatedAt:   time.Now(),
+    }
+    
+    api.writeJSON(w, http.StatusCreated, response)
+}
+```
+
+This design ensures:
+- **Clear separation of concerns**: API handles HTTP, modules handle business logic
+- **Consistent error handling**: All errors flow through standard HTTP responses
+- **Transactional operations**: Failed operations are properly cleaned up
+- **Comprehensive logging**: All operations are logged for debugging
+- **Type safety**: Strong typing throughout the request/response cycle

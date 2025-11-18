@@ -4,7 +4,7 @@ Welcome to the RedstonePanel Developer Documentation! This comprehensive guide p
 
 ## Contents
 
-- [Architecture](developer/architecture/index.md) - RedstonePanel architecture
+- [About codebase](developer/architecture/index.md) - About RedstonePanel codebase
 - [Contributing Guide](developer/contributing.md) - How to contribute to RedstonePanel
 
 ---
